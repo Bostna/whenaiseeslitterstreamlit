@@ -40,7 +40,7 @@ source .venv/bin/activate           # On Windows: .venv\Scripts\activate
 # Install dependencies
 pip install --upgrade pip
 pip install -r requirements.txt
-
+```bash
 Usage
 streamlit run streamlit_app.py
 The app will launch at http://localhost:8501.
