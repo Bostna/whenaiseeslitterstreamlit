@@ -40,16 +40,19 @@ source .venv/bin/activate           # On Windows: .venv\Scripts\activate
 # Install dependencies
 pip install --upgrade pip
 pip install -r requirements.txt
-```bash
-Usage
+```
+
+## Usage
 streamlit run streamlit_app.py
 The app will launch at http://localhost:8501.
 Upload an image or toggle the webcam mode, then click "Run detection" to see results in real time!
 
-Configuration Notes
+## Configuration Notes
 Use custom weights
 Rename your model or set an environment variable:
 export LOCAL_MODEL=my_model.pt
 PyTorch on Apple Silicon
 If torch installs slowly, try:
+```bash
 pip install 'torch==2.4.*' --extra-index-url https://download.pytorch.org/whl/cpu
+```
