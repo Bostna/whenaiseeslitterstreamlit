@@ -1,6 +1,8 @@
 import os
 import shutil
 import hashlib
+import threading
+import time
 import numpy as np
 from PIL import Image
 import streamlit as st
@@ -8,6 +10,7 @@ from ultralytics import YOLO
 
 # Live video
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration, WebRtcMode
+import av
 import cv2
 from collections import Counter
 
@@ -239,6 +242,11 @@ def load_model():
 
 # (Static modes use the cached model)
 GLOBAL_MODEL = load_model()
+MODEL_PREDICT_LOCK = threading.Lock()
+
+def ensure_global_model():
+    """Return the cached YOLO model shared by static and live inference."""
+    return GLOBAL_MODEL
 
 # ======================= Utils =======================
 def _get_names_map(pred, model):
@@ -318,43 +326,162 @@ def show_guidance_card(label: str, count: int = 0, GUIDE=None):
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ======================= Live video processor (WebRTC) =======================
-# ======================= Live video processor (WebRTC) =======================
 class YOLOProcessor(VideoProcessorBase):
     def __init__(self):
-        self.model = ensure_global_model()  # preload & reuse
-
-        # --- CORRECTED DEFAULTS ---
-        # Set a reasonable base confidence and IoU threshold.
-        # iou=0.0 was likely causing NMS to discard all boxes.
-        self.conf = 0.20  # Base confidence threshold
-        self.iou = 0.45   # NMS IoU threshold
-        
+        self.model = ensure_global_model()
+        self._lock = threading.RLock()
+        self.conf = 0.20
+        self.iou = 0.45
         self.imgsz = 640
-        
-        # Per-class thresholds now act as a secondary filter on top of the base confidence.
-        # The sliders in the UI will adjust these values.
         self.per_class_min = {
             "Clear plastic bottle": 0.20,
             "Drink can":            0.20,
             "Styrofoam piece":      0.20,
         }
-        self.min_area_pct = 0.05   # Start with a small area filter
-        self.dra_all_debug = False
-       
-        # Auto color-order detection (BGR vs RGB)
-        self.color_order = "auto"
-        self._color_locked = False
-
+        self.min_area_pct = 0.05
+        self.draw_all_debug = False
         self.last_bgr = None
         self.last_dets = []
         self.last_infer_ms = 0.0
+        self.last_error = None
 
-        # Warm-up (prevents initial blank)
+        # Warm up once so the first camera frame is less likely to appear blank.
         try:
             dummy = np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8)
-            _ = self.model.predict(dummy, conf=self.conf, iou=self.iou, imgsz=self.imgsz, verbose=False)
+            with MODEL_PREDICT_LOCK:
+                self.model.predict(dummy, conf=self.conf, iou=self.iou, imgsz=self.imgsz, verbose=False)
         except Exception:
             pass
+
+    def settings_snapshot(self):
+        with self._lock:
+            return {
+                "conf": self.conf,
+                "iou": self.iou,
+                "imgsz": self.imgsz,
+                "min_area_pct": self.min_area_pct,
+                "per_class_min": dict(self.per_class_min),
+                "draw_all_debug": self.draw_all_debug,
+            }
+
+    def update_settings(self, *, conf, iou, imgsz, min_area_pct, per_class_min, draw_all_debug):
+        with self._lock:
+            self.conf = float(conf)
+            self.iou = float(iou)
+            self.imgsz = int(imgsz)
+            self.min_area_pct = float(min_area_pct)
+            self.per_class_min = dict(per_class_min)
+            self.draw_all_debug = bool(draw_all_debug)
+
+    def capture_snapshot(self):
+        with self._lock:
+            frame = None if self.last_bgr is None else self.last_bgr.copy()
+            return frame, list(self.last_dets), self.last_infer_ms, self.last_error
+
+    def _filtered_detections(self, pred, image_shape, settings):
+        if pred.boxes is None or len(pred.boxes) == 0:
+            return []
+
+        boxes = pred.boxes.xyxy.cpu().numpy()
+        scores = pred.boxes.conf.cpu().numpy()
+        class_ids = pred.boxes.cls.cpu().numpy().astype(int)
+        names_map = _get_names_map(pred, self.model)
+        height, width = image_shape[:2]
+        min_area = (settings["min_area_pct"] / 100.0) * height * width
+        detections = []
+
+        for box, score, class_id in zip(boxes, scores, class_ids):
+            x1, y1, x2, y2 = box.tolist()
+            area = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+            class_name = names_map.get(int(class_id), str(class_id))
+            confidence = float(score)
+            if not settings["draw_all_debug"]:
+                if confidence < settings["per_class_min"].get(class_name, settings["conf"]):
+                    continue
+                if area < min_area:
+                    continue
+            detections.append({
+                "xyxy": [x1, y1, x2, y2],
+                "class_id": int(class_id),
+                "class_name": class_name,
+                "score": confidence,
+            })
+        return detections
+
+    @staticmethod
+    def _draw_detections(bgr, detections):
+        annotated = bgr.copy()
+        color = (28, 160, 78)
+        height, width = annotated.shape[:2]
+        for detection in detections:
+            x1, y1, x2, y2 = map(int, detection["xyxy"])
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+            label = f'{detection["class_name"]} {detection["score"]:.2f}'
+            (text_width, text_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+            y_text = y1 - 4
+            if y_text - text_height - 4 < 0:
+                y_text = min(y1 + text_height + 6, height - 2)
+            x_text = max(0, min(x1, width - text_width - 6))
+            cv2.rectangle(
+                annotated,
+                (x_text, max(0, y_text - text_height - 4)),
+                (min(x_text + text_width + 6, width - 1), min(y_text + 2, height - 1)),
+                color,
+                -1,
+            )
+            cv2.putText(
+                annotated,
+                label,
+                (x_text + 3, y_text - 2),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+        return annotated
+
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        """Run YOLO on one camera frame and return the annotated result."""
+        bgr = frame.to_ndarray(format="bgr24")
+        settings = self.settings_snapshot()
+        started_at = time.perf_counter()
+
+        try:
+            model_conf = 0.001 if settings["draw_all_debug"] else settings["conf"]
+            with MODEL_PREDICT_LOCK:
+                prediction = self.model.predict(
+                    bgr,
+                    conf=model_conf,
+                    iou=settings["iou"],
+                    imgsz=settings["imgsz"],
+                    max_det=300,
+                    verbose=False,
+                )[0]
+            detections = self._filtered_detections(prediction, bgr.shape, settings)
+            annotated = self._draw_detections(bgr, detections)
+            error = None
+        except Exception as exc:
+            detections = []
+            annotated = bgr.copy()
+            error = f"{type(exc).__name__}: {exc}"
+            cv2.putText(
+                annotated,
+                "Live inference failed; see the app message.",
+                (12, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 0, 255),
+                2,
+                cv2.LINE_AA,
+            )
+
+        with self._lock:
+            self.last_bgr = annotated
+            self.last_dets = detections
+            self.last_infer_ms = (time.perf_counter() - started_at) * 1000
+            self.last_error = error
+        return av.VideoFrame.from_ndarray(annotated, format="bgr24")
 
 # ======================= HEADER (logo only) =======================
 logo_col, _ = st.columns([3, 5])
@@ -402,13 +529,29 @@ if src == "Live (beta)":
     if webrtc_ctx and webrtc_ctx.video_processor:
         with st.expander("Live settings (beta)"):
             vp = webrtc_ctx.video_processor
-            vp.imgsz = st.select_slider("Live imgsz", options=[320,416,512,640,800], value=int(vp.imgsz))
-            vp.min_area_pct = st.slider("Min area (%)", 0.0, 2.0, float(vp.min_area_pct), 0.01)
-            vp.per_class_min["Clear plastic bottle"] = st.slider("Bottle min", 0.0, 1.0, float(vp.per_class_min["Clear plastic bottle"]), 0.01)
-            vp.per_class_min["Drink can"]            = st.slider("Can min",    0.0, 1.0, float(vp.per_class_min["Drink can"]), 0.01)
-            vp.per_class_min["Styrofoam piece"]      = st.slider("Foam min",   0.0, 1.0, float(vp.per_class_min["Styrofoam piece"]), 0.01)
-            vp.draw_all_debug = st.toggle("Draw ALL raw boxes (debug)", value=False,
-                                          help="Ignore thresholds & area filter to verify detections pipeline.")
+            settings = vp.settings_snapshot()
+            live_conf = st.slider("Base confidence", 0.0, 0.95, float(settings["conf"]), 0.01)
+            live_iou = st.slider("IoU", 0.0, 0.90, float(settings["iou"]), 0.01)
+            live_imgsz = st.select_slider("Live image size", options=[320, 416, 512, 640, 800], value=int(settings["imgsz"]))
+            live_min_area = st.slider("Min area (%)", 0.0, 2.0, float(settings["min_area_pct"]), 0.01)
+            live_thresholds = {
+                "Clear plastic bottle": st.slider("Bottle min", 0.0, 1.0, float(settings["per_class_min"]["Clear plastic bottle"]), 0.01),
+                "Drink can": st.slider("Can min", 0.0, 1.0, float(settings["per_class_min"]["Drink can"]), 0.01),
+                "Styrofoam piece": st.slider("Foam min", 0.0, 1.0, float(settings["per_class_min"]["Styrofoam piece"]), 0.01),
+            }
+            draw_all_debug = st.toggle(
+                "Draw all raw boxes (debug)",
+                value=settings["draw_all_debug"],
+                help="Ignore the per-class and minimum-area filters to inspect all model detections.",
+            )
+            vp.update_settings(
+                conf=live_conf,
+                iou=live_iou,
+                imgsz=live_imgsz,
+                min_area_pct=live_min_area,
+                per_class_min=live_thresholds,
+                draw_all_debug=draw_all_debug,
+            )
 
     colA, _ = st.columns([1,2])
     with colA:
@@ -416,10 +559,14 @@ if src == "Live (beta)":
             st.caption("Tip: capture the current frame to get disposal cards.")
             if st.button("Capture for guidance"):
                 vp = webrtc_ctx.video_processor
-                if vp.last_bgr is not None and len(vp.last_dets) > 0:
-                    st.image(Image.fromarray(cv2.cvtColor(vp.last_bgr, cv2.COLOR_BGR2RGB)),
+                captured_bgr, captured_dets, infer_ms, error = vp.capture_snapshot()
+                if error:
+                    st.error(f"Live inference error: {error}")
+                elif captured_bgr is not None and captured_dets:
+                    st.image(Image.fromarray(cv2.cvtColor(captured_bgr, cv2.COLOR_BGR2RGB)),
                              caption="Captured frame", use_container_width=True)
-                    counts = Counter([d["class_name"] for d in vp.last_dets])
+                    st.caption(f"Latest inference: {infer_ms:.0f} ms")
+                    counts = Counter([d["class_name"] for d in captured_dets])
                     detected_labels = sorted(counts.keys())
                     guide_labels = [lbl for lbl in detected_labels if lbl in GUIDE]
                     if guide_labels:
@@ -479,7 +626,8 @@ else:
     def run_detection(image_pil: Image.Image):
         model = GLOBAL_MODEL
         bgr = np.array(image_pil.convert("RGB"))[:, :, ::-1]
-        results = model.predict(bgr, conf=conf, iou=iou, imgsz=imgsz, verbose=False, augment=tta)
+        with MODEL_PREDICT_LOCK:
+            results = model.predict(bgr, conf=conf, iou=iou, imgsz=imgsz, verbose=False, augment=tta)
         pred = results[0]
         if pred.boxes is None or len(pred.boxes) == 0:
             st.info("No detections")

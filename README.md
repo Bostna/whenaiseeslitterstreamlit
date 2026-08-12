@@ -22,6 +22,8 @@ It is an educational sorting assistant, not an official waste-collection service
 
 This project targets Python 3.11.
 
+The direct dependencies in `requirements.txt` are pinned for repeatable deployments. The pinned PyTorch and TorchVision versions are an officially matched pair for Python 3.11.
+
 ```bash
 git clone <your-repository-url>
 cd whenaiseeslitterstreamlit
