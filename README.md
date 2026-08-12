@@ -31,14 +31,11 @@ source .venv/bin/activate
 
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
-python -m pip install streamlit-webrtc
 
 streamlit run streamlit_app.py
 ```
 
 Open the local address Streamlit displays, usually <http://localhost:8501>.
-
-> `streamlit-webrtc` is required because the app imports it for the Live (beta) option. It is installed separately above because it is not yet listed in `requirements.txt`.
 
 ## Using the app
 
@@ -66,17 +63,19 @@ export MODEL_URL="https://example.com/path/to/model.pt"
 streamlit run streamlit_app.py
 ```
 
-### Use a model stored in the project or local machine
+### Use a locally stored model
 
 Set `MODEL_URL` to an empty value so the app uses `LOCAL_MODEL` instead:
 
 ```bash
 export MODEL_URL=""
-export LOCAL_MODEL="new_taco1.pt"
+export LOCAL_MODEL="/absolute/path/to/model.pt"
 streamlit run streamlit_app.py
 ```
 
 The current interface maps class IDs in this order: `0 = Clear plastic bottle`, `1 = Drink can`, and `2 = Styrofoam piece`. Use a model trained with that same three-class ordering, otherwise the displayed labels will be inaccurate.
+
+Model weights are intentionally not versioned in this repository. Host production weights in a versioned release or object store and set `MODEL_URL` to that location.
 
 ## Project structure
 
@@ -87,13 +86,12 @@ The current interface maps class IDs in this order: `0 = Clear plastic bottle`, 
 | `packages.txt` | Operating-system packages used by hosted Linux deployments. |
 | `.streamlit/config.toml` | Streamlit colour theme. |
 | `logo.png` | Application logo. |
-| `*.pt` | YOLO model-weight files. |
-| `pages/` | Streamlit demonstration pages currently included in the navigation. |
+| `.gitignore` | Local-environment, credential, and model-weight exclusions. |
 
 ## Deployment notes
 
 - A hosted environment needs Python 3.11, the Python packages above, and the system packages in `packages.txt`.
-- If the hosting environment cannot reach the default model URL, supply the weights locally and configure `MODEL_URL=""` plus `LOCAL_MODEL`.
+- If the hosting environment cannot reach the default model URL, host the weights in an accessible release or object store, or configure `MODEL_URL=""` plus `LOCAL_MODEL`.
 - The live-camera feature requires browser camera permission and is generally most reliable over HTTPS.
 - The SDG panel expects `sdg11.png`, `sdg12.png`, and `sdg13.png`; add these assets before a public deployment to avoid missing-image warnings.
 

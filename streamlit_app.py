@@ -1,8 +1,6 @@
 import os
 import shutil
 import hashlib
-import time
-import threading
 import numpy as np
 from PIL import Image
 import streamlit as st
@@ -10,7 +8,7 @@ from ultralytics import YOLO
 
 # Live video
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration, WebRtcMode
-import av, cv2
+import cv2
 from collections import Counter
 
 st.set_page_config(page_title="When AI Sees Litter — Shibuya", page_icon="♻️", layout="wide")
@@ -68,7 +66,7 @@ apply_theme()
 
 # ======================= Config & Model =======================
 MODEL_URL   = os.getenv("MODEL_URL", "https://raw.githubusercontent.com/Bellzum/streamlit-main/main/new_taco1.pt")
-LOCAL_MODEL = os.getenv("LOCAL_MODEL", "best.pt")
+LOCAL_MODEL = os.getenv("LOCAL_MODEL", "")
 
 CACHED_DIR  = "/tmp/models"
 def _hash_url(u: str) -> str: return hashlib.sha1(u.encode("utf-8")).hexdigest()[:12]
@@ -205,7 +203,7 @@ def _download_file(url: str, dest: str):
             st.error(
                 f"Failed to download model from URL:\n{url}\n\n"
                 f"requests error: {e_req}\nurllib error: {e_url}\n\n"
-                "If private or rate-limited, make the file public or commit it to this repo."
+                "If private or rate-limited, host the file in a public release or object store."
             )
             st.stop()
 
@@ -215,7 +213,7 @@ def _ensure_model_path() -> str:
             _download_file(MODEL_URL.strip(), CACHED_PATH)
         return CACHED_PATH
     if not os.path.exists(LOCAL_MODEL):
-        st.error("Model file not found. Provide MODEL_URL or place best.pt next to this file.")
+        st.error("Model file not found. Provide MODEL_URL or set LOCAL_MODEL to a local .pt file.")
         st.stop()
     return LOCAL_MODEL
 
